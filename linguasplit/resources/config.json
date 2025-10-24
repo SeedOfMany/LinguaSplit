@@ -1,0 +1,53 @@
+{
+  "output": {
+    "format": "markdown",
+    "include_metadata": true,
+    "include_page_markers": true,
+    "preserve_formatting": true
+  },
+  "language": {
+    "auto_detect": true,
+    "default_language": "english",
+    "min_confidence": 0.5,
+    "extract_only": ""
+  },
+  "layout": {
+    "use_region_analysis": true,
+    "detect_columns": true,
+    "min_column_width": 100,
+    "column_gap_threshold": 50,
+    "detect_tables": false
+  },
+  "processing": {
+    "clean_text": true,
+    "remove_headers_footers": true,
+    "normalize_whitespace": true,
+    "fix_hyphenation": true
+  },
+  "ocr": {
+    "enabled": false,
+    "engine": "tesseract",
+    "language": "eng",
+    "dpi": 300
+  },
+  "batch": {
+    "max_workers": 4,
+    "continue_on_error": true,
+    "create_summary": true
+  },
+  "gui": {
+    "theme": "system",
+    "window_size": [1000, 700],
+    "show_preview": true,
+    "auto_save_settings": true
+  },
+  "logging": {
+    "level": "INFO",
+    "log_to_file": false,
+    "log_file": "linguasplit.log"
+  },
+  "app": {
+    "version": "1.0.0",
+    "last_updated": null
+  }
+}
