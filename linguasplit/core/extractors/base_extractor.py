@@ -66,8 +66,9 @@ class BaseExtractor(ABC):
 
     def _extract_text_blocks(self, page: fitz.Page) -> List[Dict]:
         """
-        Extract text blocks from a page preserving original line breaks.
-        Merges lines that are at the same Y-coordinate (same visual line).
+        Extract text blocks from a page preserving BOTH position AND structure.
+        For table-based PDFs, extracts individual spans as separate blocks.
+        For regular PDFs, merges lines appropriately.
 
         Args:
             page: PyMuPDF page object
@@ -86,55 +87,26 @@ class BaseExtractor(ABC):
             if block.get("type") != 0:
                 continue
 
-            # Extract text from lines - merge lines at same Y-coordinate
-            # and track empty lines for paragraph detection
-            merged_lines = []
-            current_y = None
-            current_line_parts = []
-            
+            # Extract text spans individually with their X positions preserved
+            # This is critical for table-based PDFs where multiple languages
+            # are side-by-side on the same line
             for line in block.get("lines", []):
-                # Get Y coordinate of this line
-                line_y = round(line['bbox'][1], 1)  # Round to 0.1 precision
-                
-                # Extract text from spans
-                span_texts = []
+                line_y = line['bbox'][1]
+
                 for span in line.get("spans", []):
-                    span_texts.append(span.get("text", ""))
-                line_text = "".join(span_texts)
-                
-                # If this line is at the same Y as previous, merge them
-                if current_y is not None and abs(line_y - current_y) < 2:  # Within 2 points
-                    # Same visual line - append to current with space
-                    current_line_parts.append(line_text)
-                else:
-                    # Different Y - save previous line and start new one
-                    if current_line_parts:
-                        merged_text = " ".join(current_line_parts).strip()
-                        # Keep empty lines as markers for paragraph breaks
-                        if merged_text or len(merged_lines) > 0:  # Include empty lines between content
-                            merged_lines.append(merged_text)
-                    
-                    # Start new line
-                    current_y = line_y
-                    current_line_parts = [line_text]
-            
-            # Don't forget the last line
-            if current_line_parts:
-                merged_text = " ".join(current_line_parts).strip()
-                if merged_text:
-                    merged_lines.append(merged_text)
+                    span_text = span.get("text", "").strip()
+                    if not span_text:
+                        continue
 
-            # Join lines with newline to preserve PDF structure
-            text = "\n".join(merged_lines)
-
-            if text:
-                blocks.append({
-                    'text': text,
-                    'x0': block['bbox'][0],
-                    'y0': block['bbox'][1],
-                    'x1': block['bbox'][2],
-                    'y1': block['bbox'][3]
-                })
+                    # Create a separate block for each span
+                    # This preserves X-position for column detection
+                    blocks.append({
+                        'text': span_text,
+                        'x0': span['bbox'][0],
+                        'y0': span['bbox'][1],
+                        'x1': span['bbox'][2],
+                        'y1': span['bbox'][3]
+                    })
 
         return blocks
 
@@ -181,54 +153,98 @@ class BaseExtractor(ABC):
 
         return 'unknown'
 
-    def _combine_text_blocks(self, blocks: List[Dict], separator: str = "\n\n") -> str:
+    def _combine_text_blocks(self, blocks: List[Dict], separator: str = "\n") -> str:
         """
-        Combine text blocks preserving original PDF layout.
-        Filters out repeated headers, page numbers, and footers.
+        Combine text blocks preserving reading order and paragraph structure.
+        Intelligently merges blocks on the same line, filters repeated headers.
 
         Args:
-            blocks: List of text block dictionaries
-            separator: String to use between blocks (default: double newline)
+            blocks: List of text block dictionaries (must be sorted in reading order)
+            separator: String to use between paragraphs (default: single newline)
 
         Returns:
-            Combined text string with original layout preserved
+            Combined text string with proper paragraphs
         """
         import re
-        
-        combined_parts = []
-        seen_short_blocks = {}  # Track short blocks (likely headers) and their count
-        
+
+        if not blocks:
+            return ""
+
+        # Group blocks by Y-coordinate (same line) and merge them
+        lines = []
+        current_line = []
+        current_y = None
+        y_tolerance = 5  # Points tolerance for same line
+
+        seen_short_text = {}  # Track repeated headers/footers
+
         for block in blocks:
-            if not block.get('text'):
-                continue
-            
-            text = block['text'].strip()
+            text = block.get('text', '').strip()
             if not text:
                 continue
-            
-            # Skip page numbers (single digit or small numbers, usually at bottom of page)
-            # Check if block is very short and only contains numbers/spaces
+
+            # Skip standalone page numbers
             if len(text) <= 5 and re.match(r'^\d+$', text):
                 continue
-            
-            # For short blocks (< 100 chars, likely headers), track occurrences
-            if len(text) < 100:
-                # Normalize for comparison (remove extra spaces)
+
+            # Track repeated short text (headers/footers)
+            if len(text) < 50:
                 normalized = re.sub(r'\s+', ' ', text.lower())
-                
-                if normalized in seen_short_blocks:
-                    seen_short_blocks[normalized] += 1
-                    # Skip if we've seen this exact text more than once
-                    # (repeated headers across pages)
-                    if seen_short_blocks[normalized] > 1:
+                if normalized in seen_short_text:
+                    seen_short_text[normalized] += 1
+                    # Skip if seen more than twice (repeated headers)
+                    if seen_short_text[normalized] > 2:
                         continue
                 else:
-                    seen_short_blocks[normalized] = 1
-            
-            combined_parts.append(text)
-        
-        # Join blocks with separator to maintain block boundaries
-        return separator.join(combined_parts)
+                    seen_short_text[normalized] = 1
+
+            block_y = block.get('y0', 0)
+
+            # Check if this block is on the same line as previous
+            if current_y is not None and abs(block_y - current_y) < y_tolerance:
+                # Same line - add with space
+                current_line.append(text)
+            else:
+                # New line - save previous line if exists
+                if current_line:
+                    lines.append(' '.join(current_line))
+                # Start new line
+                current_line = [text]
+                current_y = block_y
+
+        # Don't forget the last line
+        if current_line:
+            lines.append(' '.join(current_line))
+
+        # Join lines into paragraphs
+        # Detect paragraph breaks (empty lines or major Y jumps)
+        paragraphs = []
+        current_paragraph = []
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check if line looks like a header/title (short, all caps, or ends with colon)
+            is_header = (len(line) < 80 and
+                        (line.isupper() or line.endswith(':') or
+                         re.match(r'^(CHAPTER|ARTICLE|Section|Article)', line, re.I)))
+
+            if is_header and current_paragraph:
+                # Save current paragraph before header
+                paragraphs.append(' '.join(current_paragraph))
+                current_paragraph = []
+                paragraphs.append(line)  # Header on its own line
+            else:
+                current_paragraph.append(line)
+
+        # Add final paragraph
+        if current_paragraph:
+            paragraphs.append(' '.join(current_paragraph))
+
+        # Join paragraphs with double newline
+        return '\n\n'.join(p for p in paragraphs if p.strip())
 
     def _clean_text(self, text: str) -> str:
         """
